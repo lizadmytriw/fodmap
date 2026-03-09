@@ -7,11 +7,17 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body style="margin:0;padding:0">
   <div id="root"></div>
   <script type="text/babel">
-const { useState } = React;
+const { useState, useEffect } = React;
+
+// ── Supabase client ───────────────────────────────────────────────────────────
+const SUPABASE_URL = "https://pzaohkbdzkvanpnynrwh.supabase.co";
+const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB6YW9oa2Jkemt2YW5wbnlucndoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMwMDM5NzAsImV4cCI6MjA4ODU3OTk3MH0.s3XyGaV85nNXUczbIbLUqLyMQ3Men_ge4xumd6MxawI";
+const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const INIT_SAFE_FOODS = [
   { id: "sf1",  name: "Chicken breast",          category: "Protein",     emoji: "🍗" },
@@ -158,9 +164,6 @@ const BlobBg = () => (
     <circle cx="820" cy="740" r="22" fill="#E07B9A" opacity="0.3"/>
     <circle cx="950" cy="300" r="14" fill="#6DBF8A" opacity="0.35"/>
     <circle cx="120" cy="450" r="16" fill="#C47FD6" opacity="0.3"/>
-    <circle cx="500" cy="150" r="6" fill="#E07B9A" opacity="0.4"/>
-    <circle cx="720" cy="600" r="6" fill="#F4A435" opacity="0.4"/>
-    <circle cx="400" cy="500" r="5" fill="#6DBF8A" opacity="0.4"/>
   </svg>
 );
 
@@ -207,6 +210,33 @@ function App() {
   const [logPicked, setLogPicked] = useState([]);
   const [logNotes, setLogNotes]   = useState("");
   const [weekDay, setWeekDay]     = useState(todayKey());
+  const [loading, setLoading]     = useState(true);
+  const [saveStatus, setSaveStatus] = useState("");
+
+  // ── Load all data from Supabase on startup ────────────────────────────────
+  useEffect(() => {
+    async function loadData() {
+      setLoading(true);
+      try {
+        const [{ data: sf }, { data: ml }, { data: rl }] = await Promise.all([
+          supabase.from("safe_foods").select("*"),
+          supabase.from("meal_log").select("*"),
+          supabase.from("reaction_log").select("*"),
+        ]);
+        if (sf && sf.length > 0) setSafeFoods(sf);
+        if (rl && rl.length > 0) setRxLog(rl);
+        if (ml && ml.length > 0) {
+          const grouped = {};
+          ml.forEach(e => { if (!grouped[e.date]) grouped[e.date] = []; grouped[e.date].push({...e, items: e.items || [], mealType: e.meal_type}); });
+          setDailyLog(grouped);
+        }
+      } catch(e) { console.error(e); }
+      setLoading(false);
+    }
+    loadData();
+  }, []);
+
+  const showSaved = () => { setSaveStatus("✓ Saved!"); setTimeout(() => setSaveStatus(""), 2000); };
 
   const safeNames  = new Set(safeFoods.map(f => f.name));
   const safeByName = Object.fromEntries(safeFoods.map(f => [f.name, f]));
@@ -216,26 +246,52 @@ function App() {
   const getIng      = (day, mt, ing) => swaps[`${day}-${mt}-${ing}`] || ing;
   const resolveIngs = (day, mt, ings) => ings.map(ing => { const resolved = getIng(day, mt, ing); return { original:ing, resolved, missing:!safeNames.has(resolved), swapped: resolved !== ing }; });
 
-  const addSafe    = () => { if (!newName.trim()) return; setSafeFoods(p => [...p, {id:"sf"+Date.now(), name:newName.trim(), category:newCat, emoji:newEmoji}]); setNewName(""); setShowAddSafe(false); };
-  const removeSafe = id => setSafeFoods(p => p.filter(f => f.id !== id));
+  const addSafe = async () => {
+    if (!newName.trim()) return;
+    const food = {id:"sf"+Date.now(), name:newName.trim(), category:newCat, emoji:newEmoji};
+    setSafeFoods(p => [...p, food]);
+    await supabase.from("safe_foods").upsert(food);
+    setNewName(""); setShowAddSafe(false); showSaved();
+  };
+
+  const removeSafe = async (id) => {
+    setSafeFoods(p => p.filter(f => f.id !== id));
+    await supabase.from("safe_foods").delete().eq("id", id);
+    showSaved();
+  };
+
   const applySwap  = rep => { if (!picker) return; setSwaps(p => ({ ...p, [`${picker.day}-${picker.mt}-${picker.ing}`]: rep })); setPicker(null); };
   const toggleSym  = s => setRxSymptoms(p => p.includes(s) ? p.filter(x => x !== s) : [...p, s]);
   const togglePick = n => setLogPicked(p => p.includes(n) ? p.filter(x => x !== n) : [...p, n]);
 
-  const submitRx = () => {
+  const submitRx = async () => {
     if (!rxFood.trim()) return;
-    setRxLog(p => [{id:Date.now(), food:rxFood, symptoms:rxSymptoms, severity:rxSev, delay:rxDelay, notes:rxNotes, date:todayKey(), time:new Date().toTimeString().slice(0,5)}, ...p]);
-    setRxFood(""); setRxSymptoms([]); setRxSev(5); setRxDelay("under30"); setRxNotes(""); setShowRxForm(false);
+    const entry = {id:Date.now(), food:rxFood, symptoms:rxSymptoms, severity:rxSev, delay:rxDelay, notes:rxNotes, date:todayKey(), time:new Date().toTimeString().slice(0,5)};
+    setRxLog(p => [entry, ...p]);
+    await supabase.from("reaction_log").insert(entry);
+    setRxFood(""); setRxSymptoms([]); setRxSev(5); setRxDelay("under30"); setRxNotes(""); setShowRxForm(false); showSaved();
   };
 
-  const submitFood = () => {
+  const submitFood = async () => {
     let items = [];
     if (logMode === "free") items = logText.split(",").map(s=>s.trim()).filter(Boolean);
     else if (logMode === "pick") items = logPicked;
     else if (logMode === "plan") { const plan = BASE_MEALS[todayIdx()]; items = resolveIngs(plan.day, logMeal, plan.meals[logMeal]?.ingredients || []).map(i => i.resolved); }
     if (!items.length) return;
-    setDailyLog(p => ({...p, [logDate]: [...(p[logDate]||[]), {id:Date.now(), time:logTime, mealType:logMeal, items, notes:logNotes}]}));
-    setLogText(""); setLogPicked([]); setLogNotes(""); setShowFoodForm(false);
+    const entry = {id:Date.now(), time:logTime, meal_type:logMeal, mealType:logMeal, items, notes:logNotes, date:logDate};
+    setDailyLog(p => ({...p, [logDate]: [...(p[logDate]||[]), entry]}));
+    await supabase.from("meal_log").insert({id:entry.id, time:entry.time, meal_type:logMeal, items, notes:logNotes, date:logDate});
+    setLogText(""); setLogPicked([]); setLogNotes(""); setShowFoodForm(false); showSaved();
+  };
+
+  const deleteRx = async (id) => {
+    setRxLog(p => p.filter(e => e.id !== id));
+    await supabase.from("reaction_log").delete().eq("id", id);
+  };
+
+  const deleteMeal = async (date, id) => {
+    setDailyLog(p => ({...p, [date]: p[date].filter(e => e.id !== id)}));
+    await supabase.from("meal_log").delete().eq("id", id);
   };
 
   const filtSafe = safeFoods.filter(f => f.name.toLowerCase().includes(safeSearch.toLowerCase()) && (safeFilter==="All"||f.category===safeFilter));
@@ -250,6 +306,13 @@ function App() {
   ];
   const accentForTab = { meals:"#F4A435", timeline:"#E07B9A", safe:"#6DBF8A", triggers:"#E05C5C", log:"#C47FD6" };
 
+  if (loading) return (
+    <div style={{minHeight:"100vh",background:"#FFF5EE",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",fontFamily:font}}>
+      <div style={{fontSize:48,marginBottom:16}}>🌸</div>
+      <div style={{fontSize:16,color:"#C47FD6"}}>Loading your Gut Journal…</div>
+    </div>
+  );
+
   return (
     <div style={{minHeight:"100vh",background:"#FFF5EE",fontFamily:font,color:"#5A2D4C",position:"relative",overflowX:"hidden"}}>
       <BlobBg/>
@@ -262,6 +325,13 @@ function App() {
         button:hover{opacity:0.88}
       `}</style>
 
+      {/* Save status toast */}
+      {saveStatus && (
+        <div style={{position:"fixed",bottom:24,right:24,zIndex:300,background:"#6DBF8A",color:"#fff",padding:"10px 20px",borderRadius:20,fontSize:13,fontFamily:font,fontWeight:"600",boxShadow:"0 4px 16px rgba(0,0,0,0.15)"}}>
+          {saveStatus}
+        </div>
+      )}
+
       {picker && (
         <div style={{position:"fixed",inset:0,background:"rgba(90,45,76,0.45)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",padding:20,backdropFilter:"blur(4px)"}} onClick={()=>setPicker(null)}>
           <div style={{background:"#FFF8F5",border:"3px solid #F0D6E8",borderRadius:24,padding:"28px 24px",maxWidth:430,width:"100%",maxHeight:"75vh",overflow:"auto",boxShadow:"0 20px 60px rgba(90,45,76,0.25)"}} onClick={e=>e.stopPropagation()}>
@@ -269,7 +339,6 @@ function App() {
               <div style={{fontSize:28,marginBottom:6}}>🔄</div>
               <div style={{fontSize:11,color:"#C47FD6",textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:4}}>Swap ingredient</div>
               <div style={{fontSize:16,color:"#5A2D4C",fontWeight:"600"}}>"{picker.ing}"</div>
-              <div style={{fontSize:12,color:"#A07090",marginTop:4}}>Pick a replacement from your safe foods:</div>
             </div>
             {["Fruit","Vegetables","Protein","Grains","Dairy-Free","Fats & Oils","Sweeteners"].map(cat => {
               const items = safeFoods.filter(f => f.category===cat && f.name!==picker.ing);
@@ -278,11 +347,7 @@ function App() {
                 <div key={cat} style={{marginBottom:14}}>
                   <div style={{fontSize:10,textTransform:"uppercase",letterSpacing:"0.1em",color:"#C47FD6",marginBottom:7,fontWeight:"600"}}>{cat}</div>
                   <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-                    {items.map(f => (
-                      <button key={f.id} onClick={()=>applySwap(f.name)} style={{padding:"5px 12px",borderRadius:16,border:"2px solid #F0D6E8",background:"#FFF0F8",color:"#7A3060",cursor:"pointer",fontSize:12,fontFamily:font,display:"flex",alignItems:"center",gap:4}}>
-                        {f.emoji} {f.name}
-                      </button>
-                    ))}
+                    {items.map(f => <button key={f.id} onClick={()=>applySwap(f.name)} style={{padding:"5px 12px",borderRadius:16,border:"2px solid #F0D6E8",background:"#FFF0F8",color:"#7A3060",cursor:"pointer",fontSize:12,fontFamily:font,display:"flex",alignItems:"center",gap:4}}>{f.emoji} {f.name}</button>)}
                   </div>
                 </div>
               );
@@ -297,7 +362,7 @@ function App() {
           <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:10}}>
             <div style={{width:44,height:44,borderRadius:"50%",background:"linear-gradient(135deg,#F4A435,#E07B9A)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,boxShadow:"0 4px 12px #E07B9A44"}}>🌿</div>
             <div>
-              <h1 style={{margin:0,fontSize:20,fontWeight:"700",fontFamily:"'Playfair Display',Georgia,serif",color:"#5A2D4C",letterSpacing:"0.02em"}}>Gut Journal ✨</h1>
+              <h1 style={{margin:0,fontSize:20,fontWeight:"700",fontFamily:"'Playfair Display',Georgia,serif",color:"#5A2D4C"}}>Gut Journal ✨</h1>
               <p style={{margin:0,fontSize:10,color:"#C47FD6",letterSpacing:"0.12em",textTransform:"uppercase"}}>FODMAP Sensitivity Tracker</p>
             </div>
             <div style={{marginLeft:"auto",fontSize:11,color:"#A07090",background:"#FFF0F8",padding:"5px 12px",borderRadius:16,border:"1px solid #F0D6E8"}}>
@@ -320,7 +385,7 @@ function App() {
           <div>
             <div style={{marginBottom:22}}>
               <h2 style={{margin:"0 0 4px",fontSize:22,fontWeight:"700",fontFamily:"'Playfair Display',Georgia,serif",color:"#5A2D4C"}}>Weekly Meal Plan 🍽️</h2>
-              <p style={{margin:0,fontSize:12,color:"#A07090"}}>Tap any ingredient to swap it. Removed safe foods are flagged automatically.</p>
+              <p style={{margin:0,fontSize:12,color:"#A07090"}}>Tap any ingredient to swap it.</p>
             </div>
             <div style={{display:"flex",gap:8,marginBottom:24,flexWrap:"wrap"}}>
               {BASE_MEALS.map((d,i) => <Pill key={i} label={d.day} active={selDay===i} color="#F4A435" onClick={()=>setSelDay(i)}/>)}
@@ -341,7 +406,7 @@ function App() {
                         {hasMissing && <div style={{fontSize:10,color:"#E05C5C",marginBottom:8,background:"#FFF0EE",padding:"4px 10px",borderRadius:10,border:"1px solid #F5CECE"}}>⚠️ Some ingredients no longer safe</div>}
                         <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
                           {ings.map(({original,resolved,missing,swapped})=>(
-                            <button key={original} onClick={()=>setPicker({day:day.day,mt,ing:original})} style={{padding:"3px 10px",borderRadius:16,border:"2px solid",cursor:"pointer",fontSize:11,fontFamily:font,borderColor:missing?"#E05C5C":swapped?"#F4A435":"#B8E4C8",background:missing?"#FFF0EE":swapped?"#FFF8EE":"#F0FAF4",color:missing?"#E05C5C":swapped?"#C07020":"#3A8A5A",display:"flex",alignItems:"center",gap:3,transition:"all 0.15s"}}>
+                            <button key={original} onClick={()=>setPicker({day:day.day,mt,ing:original})} style={{padding:"3px 10px",borderRadius:16,border:"2px solid",cursor:"pointer",fontSize:11,fontFamily:font,borderColor:missing?"#E05C5C":swapped?"#F4A435":"#B8E4C8",background:missing?"#FFF0EE":swapped?"#FFF8EE":"#F0FAF4",color:missing?"#E05C5C":swapped?"#C07020":"#3A8A5A",display:"flex",alignItems:"center",gap:3}}>
                               {safeByName[resolved]?.emoji||"🔄"} {resolved}
                               {swapped&&<span style={{fontSize:8}}>↔</span>}
                               {missing&&<span style={{fontSize:9}}>✕</span>}
@@ -360,7 +425,7 @@ function App() {
             <div style={{marginTop:18,padding:"12px 18px",background:"#FFF8F5",border:"2px solid #F5E0EC",borderRadius:16,fontSize:12,color:"#A07090",display:"flex",gap:16,flexWrap:"wrap"}}>
               <span>🟢 <strong style={{color:"#3A8A5A"}}>Green</strong> = safe</span>
               <span>🟡 <strong style={{color:"#C07020"}}>Yellow</strong> = swapped</span>
-              <span>🔴 <strong style={{color:"#E05C5C"}}>Red</strong> = not safe · tap to swap</span>
+              <span>🔴 <strong style={{color:"#E05C5C"}}>Red</strong> = not safe</span>
             </div>
           </div>
         )}
@@ -370,7 +435,7 @@ function App() {
             <div style={{marginBottom:22,display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:10}}>
               <div>
                 <h2 style={{margin:"0 0 4px",fontSize:22,fontWeight:"700",fontFamily:"'Playfair Display',Georgia,serif",color:"#5A2D4C"}}>My Week 🌸</h2>
-                <p style={{margin:0,fontSize:12,color:"#A07090"}}>Meals & reactions on a shared timeline — spot patterns.</p>
+                <p style={{margin:0,fontSize:12,color:"#A07090"}}>Meals & reactions on a shared timeline.</p>
               </div>
               <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
                 <Btn onClick={()=>{setShowFoodForm(!showFoodForm);setShowRxForm(false);}} color="#E07B9A" ghost={showFoodForm}>{showFoodForm?"✕ Cancel":"🍽️ Log Meal"}</Btn>
@@ -466,15 +531,15 @@ function App() {
                         {all.map(entry=>(
                           <div key={entry.id} style={{display:"flex",gap:14,alignItems:"flex-start"}}>
                             <div style={{width:46,textAlign:"right",fontSize:10,color:"#C4A0B8",paddingTop:13,flexShrink:0}}>{entry.time||"—"}</div>
-                            <div style={{width:13,height:13,borderRadius:"50%",marginTop:12,flexShrink:0,zIndex:1,background:entry._type==="food"?"#E07B9A":sevColor(entry.severity),border:"3px solid #FFF5EE",boxShadow:"0 2px 6px rgba(90,45,76,0.2)"}}/>
+                            <div style={{width:13,height:13,borderRadius:"50%",marginTop:12,flexShrink:0,zIndex:1,background:entry._type==="food"?"#E07B9A":sevColor(entry.severity),border:"3px solid #FFF5EE"}}/>
                             {entry._type==="food" ? (
                               <Card color="#E07B9A" style={{flex:1,padding:"11px 14px"}}>
                                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
                                   <span style={{fontSize:9,textTransform:"uppercase",letterSpacing:"0.1em",color:MEAL_COLORS[entry.mealType]||"#E07B9A",fontWeight:"700"}}>{entry.mealType}</span>
-                                  <button onClick={()=>setDailyLog(p=>({...p,[weekDay]:p[weekDay].filter(e=>e.id!==entry.id)}))} style={{background:"none",border:"none",color:"#C4A0B8",cursor:"pointer",fontSize:13}}>🗑</button>
+                                  <button onClick={()=>deleteMeal(weekDay, entry.id)} style={{background:"none",border:"none",color:"#C4A0B8",cursor:"pointer",fontSize:13}}>🗑</button>
                                 </div>
                                 <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
-                                  {entry.items.map((item,idx)=><span key={idx} style={{fontSize:11,padding:"2px 9px",borderRadius:12,background:"#FFF0F8",color:"#C0406A",border:"1px solid #F0D0E8"}}>{safeByName[item]?.emoji||"🍽️"} {item}</span>)}
+                                  {(entry.items||[]).map((item,idx)=><span key={idx} style={{fontSize:11,padding:"2px 9px",borderRadius:12,background:"#FFF0F8",color:"#C0406A",border:"1px solid #F0D0E8"}}>{safeByName[item]?.emoji||"🍽️"} {item}</span>)}
                                 </div>
                                 {entry.notes&&<div style={{fontSize:10,color:"#C4A0B8",fontStyle:"italic",marginTop:6}}>"{entry.notes}"</div>}
                               </Card>
@@ -484,7 +549,7 @@ function App() {
                                   <span style={{fontSize:9,textTransform:"uppercase",letterSpacing:"0.1em",color:"#E05C5C",fontWeight:"700"}}>⚠️ Reaction</span>
                                   <div style={{display:"flex",alignItems:"center",gap:7}}>
                                     <span style={{fontSize:10,padding:"2px 9px",borderRadius:10,background:`${sevColor(entry.severity)}22`,color:sevColor(entry.severity),border:`1px solid ${sevColor(entry.severity)}44`,fontWeight:"600"}}>{entry.severity}/10</span>
-                                    <button onClick={()=>setRxLog(p=>p.filter(r=>r.id!==entry.id))} style={{background:"none",border:"none",color:"#C4A0B8",cursor:"pointer",fontSize:13}}>🗑</button>
+                                    <button onClick={()=>deleteRx(entry.id)} style={{background:"none",border:"none",color:"#C4A0B8",cursor:"pointer",fontSize:13}}>🗑</button>
                                   </div>
                                 </div>
                                 <div style={{fontSize:12,color:"#5A2D4C",marginBottom:entry.symptoms?.length?6:0,fontWeight:"600"}}>After: {entry.food}</div>
@@ -550,7 +615,7 @@ function App() {
           <div>
             <div style={{marginBottom:22}}>
               <h2 style={{margin:"0 0 4px",fontSize:22,fontWeight:"700",fontFamily:"'Playfair Display',Georgia,serif",color:"#5A2D4C"}}>Known Triggers 🚫</h2>
-              <p style={{margin:0,fontSize:12,color:"#A07090"}}>{TRIGGER_FOODS.length} foods to avoid based on your sensitivities.</p>
+              <p style={{margin:0,fontSize:12,color:"#A07090"}}>{TRIGGER_FOODS.length} foods to avoid.</p>
             </div>
             <div style={{display:"flex",gap:8,marginBottom:16,flexWrap:"wrap",alignItems:"center"}}>
               <div style={{flex:1,minWidth:160,display:"flex",alignItems:"center",gap:6,background:"#FFF8F5",borderRadius:20,border:"2px solid #F0D6E8",padding:"7px 14px"}}>
@@ -576,7 +641,7 @@ function App() {
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:22,flexWrap:"wrap",gap:10}}>
               <div>
                 <h2 style={{margin:"0 0 4px",fontSize:22,fontWeight:"700",fontFamily:"'Playfair Display',Georgia,serif",color:"#5A2D4C"}}>Reaction Log 📓</h2>
-                <p style={{margin:0,fontSize:12,color:"#A07090"}}>{reactionLog.length} {reactionLog.length===1?"entry":"entries"} — your full reaction history.</p>
+                <p style={{margin:0,fontSize:12,color:"#A07090"}}>{reactionLog.length} {reactionLog.length===1?"entry":"entries"} saved.</p>
               </div>
               <Btn onClick={()=>setShowRxForm(!showRxForm)} color="#C47FD6" ghost={showRxForm}>{showRxForm?"✕ Cancel":"+ Log Reaction"}</Btn>
             </div>
@@ -613,15 +678,14 @@ function App() {
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:7}}>
                       <div>
                         <div style={{fontSize:14,color:"#5A2D4C",fontWeight:"600",marginBottom:2}}>{entry.food}</div>
-                        <div style={{fontSize:10,color:"#C4A0B8"}}>🕐 {entry.date} · Reaction: {DELAY_LABELS[entry.delay]}</div>
+                        <div style={{fontSize:10,color:"#C4A0B8"}}>🕐 {entry.date} · {DELAY_LABELS[entry.delay]}</div>
                       </div>
                       <div style={{display:"flex",gap:7,alignItems:"center"}}>
                         <span style={{fontSize:11,padding:"3px 10px",borderRadius:12,background:`${sevColor(entry.severity)}22`,color:sevColor(entry.severity),border:`1px solid ${sevColor(entry.severity)}44`,fontWeight:"600"}}>{entry.severity}/10</span>
-                        <button onClick={()=>setRxLog(p=>p.filter(e=>e.id!==entry.id))} style={{background:"none",border:"none",cursor:"pointer",color:"#C4A0B8",fontSize:13}}>🗑</button>
+                        <button onClick={()=>deleteRx(entry.id)} style={{background:"none",border:"none",cursor:"pointer",color:"#C4A0B8",fontSize:13}}>🗑</button>
                       </div>
                     </div>
                     {entry.symptoms?.length>0&&<div style={{display:"flex",gap:5,flexWrap:"wrap"}}>{entry.symptoms.map(s=><span key={s} style={{fontSize:10,padding:"3px 9px",borderRadius:10,background:"#FFF0EE",color:"#E05C5C",border:"1px solid #F5CECE"}}>{s}</span>)}</div>}
-                    {entry.notes&&<div style={{fontSize:10,color:"#C4A0B8",fontStyle:"italic",marginTop:5}}>"{entry.notes}"</div>}
                   </Card>
                 ))}
               </div>
@@ -637,6 +701,7 @@ function App() {
     </div>
   );
 }
+
 ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
   </script>
 </body>
